@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="theme-color" content="#020617"/>
+<title>The League</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:'DM Sans','Segoe UI',system-ui,sans-serif;background:#020617;color:#e2e8f0;min-height:100vh}
+input,select,button{font-family:inherit;font-size:14px}
+button{cursor:pointer;background:none;border:none}
+input,select{outline:none}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-thumb{background:#1e3a2f;border-radius:99px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ── Config ────────────────────────────────────────────────────
+// After deploying to Vercel, paste your URL here OR in Setup tab
+const HARDCODED_BACKEND = "";  // e.g. "https://my-league.vercel.app"
+
+// ── Storage ───────────────────────────────────────────────────
+const LS = {
+  g: k => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } },
+  s: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+
+// ── Helpers ───────────────────────────────────────────────────
+let _id = Date.now();
+const uid = () => `${_id++}_${Math.random().toString(36).slice(2,5)}`;
+const fo = o => (!o && o !== 0) ? "—" : o > 0 ? `+${o}` : String(o);
+const ip = o => !o ? .5 : o > 0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100);
+const cw = (u,o) => { const n=parseInt(o); if(!n||isNaN(n)) return u; return n>0?+(u*n/100).toFixed(1):+(u*100/Math.abs(n)).toFixed(1); };
+const rc = r => r==="Win"?"#22c55e":r==="Loss"?"#ef4444":r==="Push"?"#64748b":"#475569";
+const AV = ["#7c3aed","#0369a1","#0f766e","#b45309","#be123c","#1d4ed8","#047857","#9333ea"];
+const ac = n => AV[(n?.charCodeAt(0)||0)%AV.length];
+const SE = {NBA:"🏀",NFL:"🏈",MLB:"⚾",NHL:"🏒",NCAAB:"🏀",NCAAF:"🏈",MLS:"⚽","UFC/MMA":"🥊",Tennis:"🎾",Golf:"⛳",Other:"🎯"};
+const SMAP = {NBA:"basketball_nba",NFL:"americanfootball_nfl",MLB:"baseball_mlb",NHL:"icehockey_nhl",NCAAB:"basketball_ncaab",NCAAF:"americanfootball_ncaaf",MLS:"soccer_usa_mls"};
+const ALL_SP = ["NFL","NBA","MLB","NHL","NCAAF","NCAAB","UFC/MMA","MLS","Tennis","Golf","Other"];
+const PIN = "1234";
+const DEF = {leagueName:"The League",startingUnits:100,maxBet:25,buyIn:20,sport:"NBA"};
+
+function inferSport(bet) {
+  if (bet.sport && bet.sport !== "Other") return bet.sport;
+  const d = (bet.description||"").toLowerCase();
+  if (/ufc|mma/.test(d)) return "UFC/MMA";
+  if (/chiefs|eagles|nfl|touchdown/.test(d)) return "NFL";
+  if (/lakers|celtics|warriors|nba/.test(d)) return "NBA";
+  if (/yankees|dodgers|mlb/.test(d)) return "MLB";
+  if (/bruins|nhl|puck/.test(d)) return "NHL";
+  if (/soccer|mls/.test(d)) return "MLS";
+  return "Other";
+}
+
+// ── API ───────────────────────────────────────────────────────
+function getBackend() {
+  return HARDCODED_BACKEND || LS.g("blg:backend") || "";
+}
+
+async function fetchOdds(sport, type="odds") {
+  const base = getBackend();
+  if (!base) return { data: null, error: "no_backend" };
+  try {
+    const r = await fetch(`${base}/api/odds?sport=${sport}&type=${type}`, {
+      signal: AbortSignal.timeout(15000)
+    });
+    const json = await r.json();
+    if (!r.ok) return { data: null, error: json.error || `HTTP ${r.status}` };
+    return { data: json, error: null };
+  } catch (e) {
+    return { data: null, error: e.name === "TimeoutError" ? "timeout" : e.message };
+  }
+}
+
+// ── State ─────────────────────────────────────────────────────
+const S = {
+  screen: "splash",
+  player: null, isComm: false, tab: "board",
+  players: LS.g("blg:players") || [],
+  bets:    LS.g("blg:bets")    || [],
+  weeks:   LS.g("blg:weeks")   || [],
+  week:    LS.g("blg:week")    || 1,
+  cfg:    { ...DEF, ...(LS.g("blg:cfg") || {}) },
+  lines: [], linesLoading: false, linesError: null, linesSport: null,
+  syncing: false, toast: null, _tt: null,
+  modal: null, slip: null,
+  histView: "weeks", histSport: null, betFilter: "All",
+};
+
+function save() {
+  LS.s("blg:players", S.players); LS.s("blg:bets", S.bets);
+  LS.s("blg:weeks", S.weeks);     LS.s("blg:week", S.week);
+  LS.s("blg:cfg", S.cfg);
+}
+
+// ── DOM ───────────────────────────────────────────────────────
+function h(tag, p={}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k,v] of Object.entries(p)) {
+    if (k === "style" && typeof v === "object") Object.assign(e.style, v);
+    else if (k === "html") e.innerHTML = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2).toLowerCase(), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of kids.flat(9)) {
+    if (c == null || c === false) continue;
+    e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return e;
+}
+const D = (p,...k) => h("div",p,...k);
+const S2 = (p,...k) => h("span",p,...k);
+const B = (p,...k) => h("button",p,...k);
+const I = p => h("input",p);
+const SL = (p,...k) => h("select",p,...k);
+
+// ── Render ────────────────────────────────────────────────────
+function render() { const r=document.getElementById("root"); r.innerHTML=""; r.appendChild(build()); }
+
+function toast(msg, type="ok") {
+  if (S._tt) clearTimeout(S._tt);
+  S.toast = {msg,type};
+  render();
+  S._tt = setTimeout(() => { S.toast=null; render(); }, 3500);
+}
+
+// ── Computed ──────────────────────────────────────────────────
+function bal(pid, w=S.week) {
+  let b = S.cfg.startingUnits;
+  S.bets.filter(x=>x.playerId===pid&&x.week===w).forEach(x=>{
+    if(x.result==="Win") b+=cw(x.units,x.odds);
+    else if(x.result==="Loss") b-=x.units;
+  });
+  return +b.toFixed(1);
+}
+function board() {
+  const wb=S.bets.filter(b=>b.week===S.week);
+  return S.players.map(p=>({...p,bal:bal(p.id),bets:wb.filter(b=>b.playerId===p.id)})).sort((a,b)=>b.bal-a.bal);
+}
+function wb() { return S.bets.filter(b=>b.week===S.week); }
+
+// ── Build ─────────────────────────────────────────────────────
+function build() {
+  if (S.screen==="splash") return buildSplash();
+  if (S.screen==="select") return buildSelect();
+  return buildShell();
+}
+
+// ═══════════════════════════════════════
+// SPLASH
+// ═══════════════════════════════════════
+function buildSplash() {
+  const hasBackend = !!getBackend();
+  const w = D({style:{minHeight:"100vh",background:"#020617",display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden"}});
+  w.appendChild(D({style:{position:"fixed",inset:0,background:"radial-gradient(ellipse 80% 60% at 50% 0%,rgba(20,83,45,.55),transparent 70%)",pointerEvents:"none"}}));
+  w.appendChild(D({style:{position:"fixed",inset:0,backgroundImage:"linear-gradient(rgba(30,58,47,.15) 1px,transparent 1px),linear-gradient(90deg,rgba(30,58,47,.15) 1px,transparent 1px)",backgroundSize:"48px 48px",pointerEvents:"none"}}));
+  const c = D({style:{position:"relative",zIndex:1,display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center",padding:"40px 24px",gap:"16px",maxWidth:"420px",width:"100%"}});
+  c.appendChild(D({style:{fontSize:"56px",filter:"drop-shadow(0 0 32px rgba(34,197,94,.5))"}},"🏆"));
+  c.appendChild(h("h1",{style:{fontSize:"30px",fontWeight:800,color:"#f1f5f9",letterSpacing:"-1px"}},S.cfg.leagueName));
+  c.appendChild(D({style:{fontSize:"11px",color:"#4ade80",fontWeight:700,letterSpacing:".12em",textTransform:"uppercase"}},"Weekly Betting League"));
+  const row = D({style:{display:"flex",width:"100%",background:"rgba(15,23,42,.9)",border:"1px solid rgba(30,58,47,.8)",borderRadius:"16px",padding:"14px 0"}});
+  [[S.players.length,"Players"],[`$${S.players.length*S.cfg.buyIn}`,"Pot"],[S.cfg.startingUnits,"Units"]].forEach(([v,l],i)=>{
+    const s=D({style:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",borderRight:i<2?"1px solid rgba(71,85,105,.3)":"none"}});
+    s.appendChild(S2({style:{fontSize:"22px",fontWeight:800,color:"#fbbf24"}},String(v)));
+    s.appendChild(S2({style:{fontSize:"9px",color:"#475569",fontWeight:700,textTransform:"uppercase",letterSpacing:".05em",marginTop:"2px"}},l));
+    row.appendChild(s);
+  });
+  c.appendChild(row);
+  c.appendChild(D({style:{fontSize:"11px",color:hasBackend?"#4ade80":"#64748b"}}, hasBackend ? "📡 Live lines enabled" : "⚠ No backend set — tap Commissioner → Setup to enable live lines"));
+  c.appendChild(B({style:{background:"linear-gradient(135deg,#15803d,#166534)",color:"#fff",borderRadius:"12px",padding:"13px 36px",fontSize:"15px",fontWeight:700,boxShadow:"0 0 20px rgba(34,197,94,.2)"},onClick:()=>{S.screen="select";render();}},"Enter League →"));
+  w.appendChild(c);
+  return w;
+}
+
+// ═══════════════════════════════════════
+// PLAYER SELECT
+// ═══════════════════════════════════════
+function buildSelect() {
+  const w = D({style:{minHeight:"100vh",background:"#020617",display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden"}});
+  w.appendChild(D({style:{position:"fixed",inset:0,background:"radial-gradient(ellipse 80% 60% at 50% 0%,rgba(20,83,45,.55),transparent 70%)",pointerEvents:"none"}}));
+  w.appendChild(D({style:{position:"fixed",inset:0,backgroundImage:"linear-gradient(rgba(30,58,47,.15) 1px,transparent 1px),linear-gradient(90deg,rgba(30,58,47,.15) 1px,transparent 1px)",backgroundSize:"48px 48px",pointerEvents:"none"}}));
+  const c = D({style:{position:"relative",zIndex:1,display:"flex",flexDirection:"column",padding:"32px 20px",maxWidth:"420px",width:"100%"}});
+  c.appendChild(D({style:{fontSize:"24px",fontWeight:800,color:"#f1f5f9",marginBottom:"4px"}},"Who are you?"));
+  c.appendChild(D({style:{fontSize:"13px",color:"#475569",marginBottom:"18px"}},"Tap your name to enter"));
+  const grid = D({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",width:"100%",marginBottom:"18px"}});
+  if (!S.players.length) grid.appendChild(D({style:{gridColumn:"span 2",color:"#334155",fontSize:"13px",textAlign:"center",padding:"24px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"No players yet — Commissioner must add players first."));
+  S.players.forEach(p=>{
+    const t=B({style:{background:"rgba(15,23,42,.9)",border:"1px solid rgba(30,58,47,.7)",borderRadius:"14px",padding:"18px 12px",display:"flex",flexDirection:"column",alignItems:"center",gap:"8px"},onClick:()=>{S.player=p;S.isComm=false;S.screen="app";render();}});
+    t.appendChild(D({style:{width:"44px",height:"44px",borderRadius:"50%",background:ac(p.name),display:"flex",alignItems:"center",justifyContent:"center",fontSize:"18px",fontWeight:800,color:"#fff"}},p.name[0].toUpperCase()));
+    t.appendChild(S2({style:{fontSize:"14px",fontWeight:700,color:"#e2e8f0"}},p.name));
+    grid.appendChild(t);
+  });
+  c.appendChild(grid);
+  let pinVisible = false;
+  const zone = D({style:{borderTop:"1px solid rgba(30,58,47,.4)",paddingTop:"16px"}});
+  const cb = B({style:{background:"transparent",color:"#475569",border:"1px solid rgba(71,85,105,.35)",borderRadius:"10px",padding:"10px",width:"100%",fontSize:"14px"},onClick:()=>{pinVisible=true;cb.style.display="none";pa.style.display="flex";pi.focus();}},"👑 Commissioner Login");
+  const pa = D({style:{display:"none",flexDirection:"column",gap:"8px"}});
+  const pi = I({type:"password",maxlength:"6",placeholder:"Enter PIN",style:{background:"rgba(15,23,42,.9)",border:"1px solid rgba(30,58,47,.8)",borderRadius:"10px",padding:"10px 14px",fontSize:"15px",color:"#e2e8f0",width:"100%"}});
+  const em = D({style:{color:"#ef4444",fontSize:"12px",textAlign:"center",display:"none"}},"Wrong PIN");
+  const tryPin = () => { if(pi.value===PIN){S.player=null;S.isComm=true;S.screen="app";render();}else{em.style.display="block";pi.value="";setTimeout(()=>em.style.display="none",2000);} };
+  const gb = B({style:{background:"#15803d",color:"#fff",borderRadius:"10px",padding:"10px 18px",fontSize:"18px"},onClick:tryPin},"→");
+  pi.addEventListener("keydown",e=>{if(e.key==="Enter")tryPin();});
+  const pr = D({style:{display:"flex",gap:"8px"}}); pr.appendChild(pi); pr.appendChild(gb);
+  pa.appendChild(pr); pa.appendChild(em);
+  pa.appendChild(D({style:{color:"#334155",fontSize:"11px",textAlign:"center"}},"Default PIN: 1234"));
+  zone.appendChild(cb); zone.appendChild(pa);
+  c.appendChild(zone);
+  w.appendChild(c);
+  return w;
+}
+
+// ═══════════════════════════════════════
+// SHELL
+// ═══════════════════════════════════════
+function buildShell() {
+  const bd = board(), me = S.player ? bd.find(p=>p.id===S.player.id) : null;
+  const shell = D({style:{minHeight:"100vh",background:"#020617",display:"flex",flexDirection:"column",color:"#e2e8f0"}});
+
+  // Topbar
+  const bar = D({style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 16px 8px",background:"rgba(2,6,23,.97)",backdropFilter:"blur(12px)",borderBottom:"1px solid rgba(30,58,47,.5)",position:"sticky",top:0,zIndex:100}});
+  const bl = D({});
+  bl.appendChild(D({style:{fontSize:"17px",fontWeight:800,color:"#fbbf24"}},S.cfg.leagueName));
+  bl.appendChild(D({style:{fontSize:"11px",color:"#4ade80",marginTop:"1px"}},`Week ${S.week} · $${S.players.length*S.cfg.buyIn} pot`));
+  const br = D({style:{display:"flex",gap:"8px",alignItems:"center"}});
+  const syncB = B({style:{background:"rgba(30,58,47,.5)",border:"1px solid rgba(34,197,94,.2)",borderRadius:"8px",width:"34px",height:"34px",display:"flex",alignItems:"center",justifyContent:"center",color:"#4ade80",fontSize:"16px"},onClick:doSync});
+  syncB.appendChild(S2({style:{display:"inline-block",animation:S.syncing?"spin .8s linear infinite":"none"}},S.syncing?"⟳":"↻"));
+  br.appendChild(syncB);
+  if(S.isComm) br.appendChild(B({style:{background:"rgba(234,179,8,.08)",color:"#fbbf24",border:"1px solid rgba(234,179,8,.3)",borderRadius:"8px",padding:"6px 11px",fontSize:"12px",fontWeight:700},onClick:()=>{S.modal="lock";render();}},"Lock Week"));
+  br.appendChild(B({style:{width:"34px",height:"34px",borderRadius:"50%",background:S.isComm?"linear-gradient(135deg,#b45309,#92400e)":`linear-gradient(135deg,${ac(S.player?.name)},${ac(S.player?.name)}bb)`,color:"#fff",fontSize:"14px",fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center"},onClick:()=>{S.screen="select";S.player=null;S.isComm=false;render();}},S.isComm?"👑":(S.player?.name?.[0]?.toUpperCase()||"?")));
+  bar.appendChild(bl); bar.appendChild(br); shell.appendChild(bar);
+
+  // Context strip
+  const ctx = D({style:{background:"rgba(15,23,42,.7)",borderBottom:"1px solid rgba(30,58,47,.3)",padding:"6px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}});
+  if(S.isComm) ctx.appendChild(S2({style:{fontSize:"11px",color:"#94a3b8"}},"👑 Commissioner — full access"));
+  else {
+    const l=S2({style:{fontSize:"11px",color:"#94a3b8"}});
+    l.innerHTML=`Playing as <strong style="color:#fbbf24">${S.player?.name||""}</strong>`;
+    ctx.appendChild(l);
+    if(me) ctx.appendChild(S2({style:{fontSize:"12px",fontWeight:700,color:me.bal>S.cfg.startingUnits?"#4ade80":me.bal<S.cfg.startingUnits?"#f87171":"#64748b"}},`${me.bal}u ${me.bal>S.cfg.startingUnits?"▲":me.bal<S.cfg.startingUnits?"▼":"—"}`));
+  }
+  shell.appendChild(ctx);
+
+  // Content
+  const content = D({style:{flex:1,overflowY:"auto",paddingBottom:"80px"}});
+  const pages = {board:buildBoard,lines:buildLines,bets:buildBets,log:buildLog,history:buildHistory,recap:()=>buildRecap(bd),setup:S.isComm?buildSetup:buildBoard};
+  content.appendChild((pages[S.tab]||buildBoard)(bd));
+  shell.appendChild(content);
+
+  // Nav
+  const nav = h("nav",{style:{position:"fixed",bottom:0,left:0,right:0,background:"rgba(2,6,23,.97)",backdropFilter:"blur(16px)",borderTop:"1px solid rgba(30,58,47,.5)",display:"flex",zIndex:100,padding:"0 0 4px"}});
+  [{id:"board",icon:"🏆",lbl:"Board"},{id:"lines",icon:"📡",lbl:"Lines"},{id:"bets",icon:"📋",lbl:"Bets"},{id:"log",icon:"✚",lbl:"Log"},{id:"history",icon:"📊",lbl:"History"},{id:"recap",icon:"📣",lbl:"Recap"},...(S.isComm?[{id:"setup",icon:"⚙",lbl:"Setup"}]:[])].forEach(n=>{
+    const nb=B({style:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:"2px",padding:"8px 2px 4px",color:S.tab===n.id?"#4ade80":"#334155"},onClick:()=>{S.tab=n.id;render();}});
+    nb.appendChild(S2({style:{fontSize:"15px"}},n.icon));
+    nb.appendChild(S2({style:{fontSize:"9px",fontWeight:700,letterSpacing:".04em"}},n.lbl));
+    nav.appendChild(nb);
+  });
+  shell.appendChild(nav);
+
+  if(S.toast){const t=D({style:{position:"fixed",bottom:"90px",left:"50%",transform:"translateX(-50%)",color:"#fff",borderRadius:"10px",padding:"11px 20px",fontSize:"14px",fontWeight:600,zIndex:9999,boxShadow:"0 8px 32px rgba(0,0,0,.5)",border:`1px solid ${S.toast.type==="err"?"#ef4444":"#22c55e"}`,background:S.toast.type==="err"?"#991b1b":"#14532d",whiteSpace:"nowrap"}},S.toast.msg);shell.appendChild(t);}
+  if(S.modal==="lock") shell.appendChild(buildLockModal(bd));
+  if(S.slip) shell.appendChild(buildSlip());
+  return shell;
+}
+
+// ═══════════════════════════════════════
+// ACTIONS
+// ═══════════════════════════════════════
+async function doSync() {
+  if (!getBackend()) { toast("Add your backend URL in Setup first","err"); return; }
+  S.syncing=true; render();
+  const sport=S.linesSport||S.cfg.sport;
+  const [{data:games},{data:scores}] = await Promise.all([fetchOdds(sport,"odds"),fetchOdds(sport,"scores")]);
+  if(Array.isArray(games)){S.lines=games;S.linesError=null;}
+  let n=0;
+  if(Array.isArray(scores)){
+    S.bets=S.bets.map(bet=>{
+      if(bet.result!=="Pending"||!bet.gameId) return bet;
+      const sc=scores.find(s=>s.id===bet.gameId); if(!sc?.completed) return bet;
+      const hs=sc.scores?.find(s=>s.name===sc.home_team)?.score, as=sc.scores?.find(s=>s.name===sc.away_team)?.score;
+      if(hs==null||as==null) return bet;
+      const d=bet.description.toLowerCase(),hw=+hs>+as,aw=+as>+hs,mh=d.includes(sc.home_team.toLowerCase()),ma=d.includes(sc.away_team.toLowerCase());
+      let result=bet.result;
+      if(mh&&hw)result="Win";else if(mh&&aw)result="Loss";else if(ma&&aw)result="Win";else if(ma&&hw)result="Loss";
+      if(result!==bet.result){n++;return{...bet,result};}
+      return bet;
+    });
+  }
+  save(); S.syncing=false;
+  toast(n>0?`Synced — settled ${n} bet${n>1?"s":""}! ✅`:"Synced ✅");
+}
+
+async function loadLines(sport) {
+  if (!getBackend()) { S.linesError="no_backend"; S.lines=[]; S.linesLoading=false; S.linesSport=sport; render(); return; }
+  S.linesLoading=true; S.linesError=null; S.lines=[]; S.linesSport=sport; render();
+  const {data,error}=await fetchOdds(sport,"odds");
+  S.linesLoading=false;
+  if(Array.isArray(data)){S.lines=data;S.linesError=null;}
+  else S.linesError=error||"unknown";
+  render();
+}
+
+function endWeek() {
+  const bd2=board(),w2=wb(),top=bd2[0];
+  const best=w2.filter(b=>b.result==="Win").sort((a,b)=>ip(+a.odds)-ip(+b.odds))[0]||null;
+  const worst=w2.filter(b=>b.result==="Loss").sort((a,b)=>b.units-a.units)[0]||null;
+  S.weeks=[...S.weeks.filter(x=>x.week!==S.week),{week:S.week,winner:top?.name||"TBD",winnerId:top?.id,winnerBal:top?.bal,pot:S.players.length*S.cfg.buyIn,standings:bd2.map(p=>({id:p.id,name:p.name,bal:p.bal})),best,worst,date:new Date().toLocaleDateString()}];
+  S.week++; S.modal=null; save();
+  toast(`Week ${S.week-1} locked! ${top?.name||"TBD"} wins! 🏆`);
+  S.tab="recap"; render();
+}
+
+// ═══════════════════════════════════════
+// BOARD
+// ═══════════════════════════════════════
+function buildBoard(bd2) {
+  if(!bd2) bd2=board();
+  const w2=wb(),won=w2.filter(b=>b.result==="Win").length,lost=w2.filter(b=>b.result==="Loss").length,live=w2.filter(b=>b.result==="Pending").length;
+  const pg=D({style:{padding:"18px 16px",display:"flex",flexDirection:"column",gap:"14px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  const hero=D({style:{background:"linear-gradient(135deg,rgba(20,83,45,.4),rgba(6,78,59,.3))",border:"1px solid rgba(34,197,94,.2)",borderRadius:"20px",padding:"24px 20px",textAlign:"center"}});
+  hero.appendChild(D({style:{fontSize:"10px",fontWeight:700,color:"#4ade80",letterSpacing:".14em",textTransform:"uppercase"}},"THIS WEEK'S POT"));
+  hero.appendChild(D({style:{fontSize:"50px",fontWeight:800,color:"#fbbf24",letterSpacing:"-2px",lineHeight:"1.1",margin:"6px 0"}},`$${S.players.length*S.cfg.buyIn}`));
+  hero.appendChild(D({style:{fontSize:"12px",color:"#475569"}},`Week ${S.week} · ${S.players.length} players · ${S.cfg.startingUnits} units each`));
+  const hs=D({style:{display:"flex",justifyContent:"center",gap:"12px",marginTop:"8px",fontSize:"13px"}});
+  hs.appendChild(S2({style:{color:"#4ade80",fontWeight:700}},`${won}W`));
+  hs.appendChild(S2({style:{color:"#334155"}},"·"));
+  hs.appendChild(S2({style:{color:"#f87171",fontWeight:700}},`${lost}L`));
+  hs.appendChild(S2({style:{color:"#334155"}},"·"));
+  hs.appendChild(S2({style:{color:"#94a3b8"}},`${live} live`));
+  hero.appendChild(hs); pg.appendChild(hero);
+  const card=D({style:{background:"rgba(15,23,42,.6)",border:"1px solid rgba(30,58,47,.5)",borderRadius:"16px",overflow:"hidden"}});
+  if(!bd2.length) card.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px"}},"No players yet. Commissioner adds players in Setup."));
+  bd2.forEach((p,i)=>{
+    const delta=+(p.bal-S.cfg.startingUnits).toFixed(1),pct=Math.min(100,Math.max(4,(p.bal/(S.cfg.startingUnits*1.6))*100)),pending=p.bets.filter(b=>b.result==="Pending").length;
+    const row=D({style:{display:"flex",alignItems:"center",gap:"12px",padding:"13px 15px",borderBottom:"1px solid rgba(30,58,47,.2)",background:i===0?"rgba(234,179,8,.06)":"transparent"}});
+    row.appendChild(D({style:{fontSize:"22px",minWidth:"30px",textAlign:"center"}},i===0?"🥇":i===1?"🥈":i===2?"🥉":String(i+1)));
+    const mid=D({style:{flex:1,minWidth:0}});
+    mid.appendChild(D({style:{fontSize:"15px",fontWeight:700,color:"#f1f5f9",marginBottom:"5px"}},p.name));
+    const bar2=D({style:{height:"4px",background:"rgba(255,255,255,.06)",borderRadius:"99px",overflow:"hidden",marginBottom:"3px"}});
+    bar2.appendChild(D({style:{height:"100%",width:`${pct}%`,borderRadius:"99px",background:i===0?"linear-gradient(90deg,#f59e0b,#fbbf24)":"linear-gradient(90deg,#16a34a,#22c55e)"}}));
+    mid.appendChild(bar2);
+    const mt=D({style:{fontSize:"11px",color:"#475569"}},`${p.bets.length} bet${p.bets.length!==1?"s":""}`);
+    if(pending>0) mt.appendChild(S2({style:{color:"#fbbf24",fontWeight:700,marginLeft:"6px"}},`${pending} live`));
+    mid.appendChild(mt); row.appendChild(mid);
+    const rt=D({style:{textAlign:"right"}});
+    const bd3=D({style:{fontSize:"20px",fontWeight:800,color:"#fbbf24"}},String(p.bal));
+    bd3.appendChild(S2({style:{fontSize:"11px",color:"#64748b",fontWeight:400}},"u"));
+    rt.appendChild(bd3);
+    rt.appendChild(D({style:{fontSize:"12px",fontWeight:700,color:delta>0?"#4ade80":delta<0?"#f87171":"#475569"}},`${delta>0?"+":""}${delta}`));
+    row.appendChild(rt); card.appendChild(row);
+  });
+  pg.appendChild(card);
+  return pg;
+}
+
+// ═══════════════════════════════════════
+// LINES
+// ═══════════════════════════════════════
+function buildLines() {
+  const sport=S.linesSport||S.cfg.sport;
+  const hasBackend=!!getBackend();
+  const pg=D({style:{padding:"18px 16px",display:"flex",flexDirection:"column",gap:"14px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  const hdr=D({style:{display:"flex",justifyContent:"space-between",alignItems:"center"}});
+  hdr.appendChild(D({style:{fontSize:"20px",fontWeight:800,color:"#f1f5f9"}},"Live Lines"));
+  const rb=B({style:{background:"rgba(30,58,47,.5)",border:"1px solid rgba(34,197,94,.2)",borderRadius:"8px",width:"34px",height:"34px",display:"flex",alignItems:"center",justifyContent:"center",color:"#4ade80",fontSize:"16px"},onClick:()=>loadLines(sport)},S.linesLoading?"⟳":"↻");
+  hdr.appendChild(rb); pg.appendChild(hdr);
+
+  // Sport tabs
+  const tabs=D({style:{display:"flex",gap:"6px",overflowX:"auto",paddingBottom:"4px"}});
+  Object.keys(SMAP).forEach(sp=>{
+    const active=sport===sp;
+    tabs.appendChild(B({style:{background:active?"rgba(20,83,45,.35)":"rgba(15,23,42,.8)",color:active?"#4ade80":"#334155",border:`1px solid ${active?"rgba(34,197,94,.35)":"rgba(30,41,59,.8)"}`,borderRadius:"8px",padding:"6px 12px",fontSize:"13px",fontWeight:600,whiteSpace:"nowrap",flexShrink:0},onClick:()=>loadLines(sp)},`${SE[sp]} ${sp}`));
+  });
+  pg.appendChild(tabs);
+
+  if(!hasBackend){
+    const box=D({style:{background:"rgba(30,41,59,.5)",border:"1px solid rgba(71,85,105,.3)",borderRadius:"14px",padding:"20px",textAlign:"center"}});
+    box.appendChild(D({style:{fontSize:"28px",marginBottom:"10px"}},"⚙️"));
+    box.appendChild(D({style:{fontSize:"16px",fontWeight:700,color:"#e2e8f0",marginBottom:"8px"}},"Backend required for live lines"));
+    const note=D({style:{fontSize:"13px",color:"#64748b",lineHeight:"1.7",marginBottom:"14px"}});
+    note.innerHTML=`You need to deploy the free Vercel backend first.<br>It takes <strong style="color:#e2e8f0">3 minutes</strong> — download the zip file from Claude and follow the guide.`;
+    box.appendChild(note);
+    box.appendChild(B({style:{background:"linear-gradient(135deg,#15803d,#166534)",color:"#fff",borderRadius:"10px",padding:"10px 20px",fontSize:"14px",fontWeight:700},onClick:()=>{S.tab="setup";render();}},"Go to Setup →"));
+    pg.appendChild(box);
+    return pg;
+  }
+
+  if(S.linesLoading){
+    const ld=D({style:{textAlign:"center",padding:"48px 0",color:"#475569"}});
+    ld.appendChild(D({style:{fontSize:"28px",marginBottom:"8px",animation:"spin .8s linear infinite",display:"inline-block"}},"⟳"));
+    ld.appendChild(D({},`Fetching ${SE[sport]||""} ${sport} lines…`));
+    ld.appendChild(D({style:{fontSize:"11px",color:"#334155",marginTop:"4px"}},"Usually 3–8 seconds"));
+    pg.appendChild(ld); return pg;
+  }
+
+  if(S.linesError){
+    const err=D({style:{background:"rgba(127,29,29,.15)",border:"1px solid rgba(239,68,68,.2)",borderRadius:"12px",padding:"20px",textAlign:"center"}});
+    err.appendChild(D({style:{fontSize:"20px",marginBottom:"6px"}},"⚠️"));
+    err.appendChild(D({style:{color:"#f87171",fontWeight:700,marginBottom:"4px"}},"Could not load lines"));
+    err.appendChild(D({style:{color:"#64748b",fontSize:"12px",marginBottom:"12px"}},S.linesError));
+    err.appendChild(B({style:{background:"transparent",color:"#4ade80",border:"1px solid rgba(34,197,94,.25)",borderRadius:"10px",padding:"8px 16px",fontSize:"13px",fontWeight:600},onClick:()=>loadLines(sport)},"↻  Retry"));
+    pg.appendChild(err); return pg;
+  }
+
+  if(!S.lines.length){
+    if(!S.linesLoading) setTimeout(()=>loadLines(sport),50);
+    pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},`No ${sport} games right now. Try another sport.`));
+    return pg;
+  }
+
+  S.lines.forEach(game=>{
+    const gc=D({style:{background:"rgba(15,23,42,.75)",border:"1px solid rgba(30,41,59,.8)",borderRadius:"14px",padding:"14px 14px 10px"}});
+    try{gc.appendChild(D({style:{fontSize:"11px",color:"#334155",fontWeight:600,marginBottom:"6px"}},new Date(game.commence_time).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})));}catch{}
+    const mu=D({style:{display:"flex",alignItems:"center",gap:"8px",marginBottom:"12px"}});
+    mu.appendChild(S2({style:{fontSize:"14px",fontWeight:700,color:"#e2e8f0",flex:1}},game.away_team));
+    mu.appendChild(S2({style:{color:"#334155",fontSize:"11px"}},"@"));
+    mu.appendChild(S2({style:{fontSize:"14px",fontWeight:700,color:"#e2e8f0",flex:1,textAlign:"right"}},game.home_team));
+    gc.appendChild(mu);
+    const bm=k=>{for(const bk of(game.bookmakers||[])){const m=bk.markets?.find(x=>x.key===k);if(m?.outcomes?.length)return m.outcomes;}return null;};
+    const ml=bm("h2h"),sp2=bm("spreads"),tot=bm("totals");
+    const awML=ml?.find(o=>o.name===game.away_team),hmML=ml?.find(o=>o.name===game.home_team);
+    const awSP=sp2?.find(o=>o.name===game.away_team),hmSP=sp2?.find(o=>o.name===game.home_team);
+    const over=tot?.find(o=>o.name==="Over"),under=tot?.find(o=>o.name==="Under");
+    const os=(label,pick,odds)=>{S.slip={game,label,pick,odds,sport};render();};
+    function mrow(label,L,R){
+      const wr=D({});
+      wr.appendChild(D({style:{fontSize:"10px",fontWeight:800,color:"#334155",textTransform:"uppercase",letterSpacing:".08em",marginBottom:"5px"}},label));
+      const g2=D({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"6px"}});
+      [L,R].forEach(s=>{
+        if(!s){g2.appendChild(D({}));return;}
+        const ob=B({style:{background:"rgba(2,6,23,.85)",border:"1px solid rgba(30,41,59,.9)",borderRadius:"10px",padding:"9px 8px",display:"flex",flexDirection:"column",alignItems:"center",gap:"2px"}});
+        ob.addEventListener("click",s.fn);
+        ob.appendChild(S2({style:{fontSize:"11px",color:"#94a3b8",textAlign:"center",lineHeight:"1.3"}},s.t));
+        ob.appendChild(S2({style:{fontSize:"17px",fontWeight:800,color:s.o>0?"#4ade80":"#fb923c",marginTop:"2px"}},fo(s.o)));
+        g2.appendChild(ob);
+      });
+      wr.appendChild(g2); return wr;
+    }
+    const wrap=D({style:{display:"flex",flexDirection:"column",gap:"8px"}});
+    if(awML||hmML) wrap.appendChild(mrow("Moneyline",awML&&{t:game.away_team.split(" ").pop(),o:awML.price,fn:()=>os("ML",`${game.away_team} ML`,awML.price)},hmML&&{t:game.home_team.split(" ").pop(),o:hmML.price,fn:()=>os("ML",`${game.home_team} ML`,hmML.price)}));
+    if(awSP||hmSP) wrap.appendChild(mrow("Spread",awSP&&{t:`${game.away_team.split(" ").pop()} ${awSP.point>0?"+":""}${awSP.point}`,o:awSP.price,fn:()=>os("Spread",`${game.away_team} ${awSP.point>0?"+":""}${awSP.point}`,awSP.price)},hmSP&&{t:`${game.home_team.split(" ").pop()} ${hmSP.point>0?"+":""}${hmSP.point}`,o:hmSP.price,fn:()=>os("Spread",`${game.home_team} ${hmSP.point>0?"+":""}${hmSP.point}`,hmSP.price)}));
+    if(over||under) wrap.appendChild(mrow(`Total ${over?.point||under?.point}`,over&&{t:`Over ${over.point}`,o:over.price,fn:()=>os("Total",`Over ${over.point}`,over.price)},under&&{t:`Under ${under.point}`,o:under.price,fn:()=>os("Total",`Under ${under.point}`,under.price)}));
+    gc.appendChild(wrap); pg.appendChild(gc);
+  });
+  return pg;
+}
+
+// ═══════════════════════════════════════
+// BET SLIP
+// ═══════════════════════════════════════
+function buildSlip() {
+  const {slip:sl,cfg,bets,week,players,player,isComm}=S;
+  if(!sl) return D({});
+  const avail=isComm?players:(player?players.filter(p=>p.id===player.id):[]);
+  let spid=player?.id||(isComm?"":players[0]?.id||"");
+  const ov=D({style:{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:9500,display:"flex",alignItems:"flex-end",justifyContent:"center"}});
+  ov.addEventListener("click",()=>{S.slip=null;render();});
+  const box=D({style:{background:"#0f172a",borderRadius:"20px 20px 0 0",border:"1px solid rgba(30,58,47,.8)",padding:"22px 18px 44px",width:"100%",maxWidth:"500px",display:"flex",flexDirection:"column",gap:"12px",animation:"slideUp .2s ease"}});
+  box.addEventListener("click",e=>e.stopPropagation());
+  const tr=D({style:{display:"flex",justifyContent:"space-between",alignItems:"center"}});
+  tr.appendChild(S2({style:{color:"#4ade80",fontSize:"12px",fontWeight:700}},`${SE[sl.sport]||"🎯"} ${sl.sport} · ${sl.label}`));
+  tr.appendChild(B({style:{color:"#475569",fontSize:"20px"},onClick:()=>{S.slip=null;render();}},"✕"));
+  box.appendChild(tr);
+  box.appendChild(D({style:{fontSize:"12px",color:"#64748b"}},`${sl.game.away_team} @ ${sl.game.home_team}`));
+  const sb=D({style:{background:"rgba(20,83,45,.15)",border:"1px solid rgba(34,197,94,.2)",borderRadius:"12px",padding:"12px 14px",display:"flex",alignItems:"center",gap:"10px"}});
+  sb.appendChild(S2({style:{fontWeight:800,color:"#f1f5f9",flex:1,fontSize:"15px"}},sl.pick));
+  sb.appendChild(S2({style:{fontSize:"24px",fontWeight:800,color:sl.odds>0?"#4ade80":"#fb923c"}},fo(sl.odds)));
+  box.appendChild(sb);
+  if(avail.length>1||isComm){
+    const lb=D({style:{fontSize:"11px",fontWeight:800,color:"#334155",textTransform:"uppercase",letterSpacing:".07em",marginBottom:"5px"}},"Betting as");
+    const ps=SL({style:{background:"rgba(2,6,23,.9)",border:"1px solid rgba(30,41,59,.9)",borderRadius:"10px",padding:"11px 13px",fontSize:"14px",color:"#e2e8f0",width:"100%"}});
+    if(!player||isComm) ps.appendChild(h("option",{value:""},"Select player…"));
+    avail.forEach(p=>{const o=h("option",{value:p.id},p.name);if(p.id===spid)o.selected=true;ps.appendChild(o);});
+    ps.addEventListener("change",e=>spid=e.target.value);
+    box.appendChild(lb); box.appendChild(ps);
+  }
+  const sbal=(()=>{let b=cfg.startingUnits;bets.filter(x=>x.playerId===spid&&x.week===week).forEach(x=>{if(x.result==="Win")b+=cw(x.units,x.odds);else if(x.result==="Loss")b-=x.units;});return +b.toFixed(1);})();
+  const ulb=D({});ulb.innerHTML=`<span style="font-size:11px;font-weight:800;color:#334155;text-transform:uppercase;letter-spacing:.07em">Units</span> <span style="font-size:11px;color:#334155">(max ${cfg.maxBet} · you have ${sbal}u)</span>`;
+  box.appendChild(ulb);
+  const ui=I({type:"number",placeholder:`1–${Math.min(cfg.maxBet,sbal)}`,style:{background:"rgba(2,6,23,.9)",border:"1px solid rgba(30,41,59,.9)",borderRadius:"10px",padding:"11px 13px",fontSize:"14px",color:"#e2e8f0",width:"100%"}});
+  box.appendChild(ui);
+  const pv=D({style:{background:"rgba(234,179,8,.06)",border:"1px solid rgba(234,179,8,.15)",borderRadius:"10px",padding:"10px 13px",display:"none",flexDirection:"column",gap:"5px"}});
+  const pw=D({style:{display:"flex",justifyContent:"space-between"}}),pvw=S2({style:{color:"#4ade80",fontWeight:800}},"");
+  pw.appendChild(S2({style:{color:"#475569",fontSize:"12px"}},"Potential win")); pw.appendChild(pvw); pv.appendChild(pw);
+  const pl2=D({style:{display:"flex",justifyContent:"space-between"}}),pvl=S2({style:{color:"#94a3b8",fontWeight:600,fontSize:"12px"}},"");
+  pl2.appendChild(S2({style:{color:"#475569",fontSize:"12px"}},"Balance if loss")); pl2.appendChild(pvl); pv.appendChild(pl2);
+  box.appendChild(pv);
+  ui.addEventListener("input",()=>{const u=+ui.value;if(u>0&&sl.odds){pv.style.display="flex";pvw.textContent=`+${cw(u,sl.odds)}u`;pvl.textContent=`${+(sbal-u).toFixed(1)}u`;}else pv.style.display="none";});
+  box.appendChild(B({style:{background:"linear-gradient(135deg,#15803d,#166534)",color:"#fff",borderRadius:"12px",padding:"13px",fontSize:"15px",fontWeight:700,width:"100%"},onClick:()=>{
+    const u=+ui.value;
+    if(!spid){toast("Select a player","err");return;}
+    if(!u||u<=0){toast("Enter valid units","err");return;}
+    if(u>cfg.maxBet){toast(`Max ${cfg.maxBet} units`,"err");return;}
+    if(u>sbal){toast(`Only ${sbal}u left`,"err");return;}
+    const pl3=players.find(p=>p.id===spid);
+    S.bets=[...S.bets,{id:uid(),playerId:spid,description:`${sl.pick} — ${sl.game.away_team} @ ${sl.game.home_team}`,betType:"Straight",sport:sl.sport,units:u,odds:sl.odds,result:"Pending",week,gameId:sl.game.id,createdAt:Date.now()}];
+    save(); S.slip=null; toast(`Logged for ${pl3?.name}! 🎯`);
+  }},"Confirm Bet 🎯"));
+  ov.appendChild(box);
+  setTimeout(()=>ui.focus(),150);
+  return ov;
+}
+
+// ═══════════════════════════════════════
+// BETS FEED
+// ═══════════════════════════════════════
+function buildBets() {
+  const w2=wb();
+  const pg=D({style:{padding:"18px 16px",display:"flex",flexDirection:"column",gap:"14px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  pg.appendChild(D({style:{fontSize:"20px",fontWeight:800,color:"#f1f5f9"}},"This Week's Bets"));
+  const chips=D({style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+  ["All",...(S.player?["Mine"]:[]),...S.players.map(p=>p.name)].forEach(f=>{
+    const a=S.betFilter===f;
+    chips.appendChild(B({style:{background:a?"rgba(20,83,45,.35)":"rgba(15,23,42,.8)",color:a?"#4ade80":"#334155",border:`1px solid ${a?"rgba(34,197,94,.35)":"rgba(30,41,59,.8)"}`,borderRadius:"8px",padding:"6px 12px",fontSize:"13px",fontWeight:600},onClick:()=>{S.betFilter=f;render();}},f));
+  });
+  pg.appendChild(chips);
+  const shown=S.betFilter==="All"?w2:S.betFilter==="Mine"?w2.filter(b=>S.player&&b.playerId===S.player.id):w2.filter(b=>S.players.find(p=>p.id===b.playerId)?.name===S.betFilter);
+  if(!shown.length){pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"No bets this week."));return pg;}
+  const list=D({style:{display:"flex",flexDirection:"column",gap:"10px"}});
+  shown.slice().reverse().forEach(bet=>{
+    const pl=S.players.find(p=>p.id===bet.playerId),sp=inferSport(bet),col=rc(bet.result),win=cw(bet.units,bet.odds);
+    const canSettle=S.isComm||(S.player&&bet.playerId===S.player.id);
+    const card=D({style:{display:"flex",background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.7)",borderRadius:"13px",overflow:"hidden"}});
+    card.appendChild(D({style:{width:"4px",flexShrink:0,background:col}}));
+    const body=D({style:{flex:1,padding:"12px 13px 12px 11px"}});
+    const tr2=D({style:{display:"flex",justifyContent:"space-between",marginBottom:"7px"}});
+    const pr=D({style:{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}});
+    pr.appendChild(D({style:{width:"24px",height:"24px",borderRadius:"50%",background:ac(pl?.name),display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:800,color:"#fff"}},pl?.name?.[0]||"?"));
+    pr.appendChild(S2({style:{fontSize:"13px",fontWeight:700,color:"#94a3b8"}},pl?.name||""));
+    pr.appendChild(S2({style:{fontSize:"10px",color:"#334155",background:"rgba(30,41,59,.9)",padding:"1px 6px",borderRadius:"5px"}},`${SE[sp]||"🎯"} ${sp}`));
+    tr2.appendChild(pr);
+    tr2.appendChild(D({style:{borderRadius:"7px",padding:"2px 8px",fontSize:"11px",fontWeight:700,border:`1px solid ${col}55`,background:col+"22",color:col}},bet.result));
+    body.appendChild(tr2);
+    body.appendChild(D({style:{fontSize:"14px",color:"#e2e8f0",marginBottom:"7px",lineHeight:"1.4"}},bet.description));
+    const mt=D({style:{display:"flex",gap:"5px",flexWrap:"wrap"}});
+    [{t:bet.betType},{t:`${bet.units}u @ ${fo(bet.odds)}`},{t:`win: +${win}u`,c:"#4ade80"}].forEach(({t,c})=>mt.appendChild(S2({style:{background:"rgba(30,41,59,.9)",color:c||"#475569",borderRadius:"6px",padding:"2px 7px",fontSize:"11px",fontWeight:600}},t)));
+    body.appendChild(mt);
+    if(bet.result==="Pending"&&canSettle){
+      const br2=D({style:{display:"flex",gap:"6px",marginTop:"10px"}});
+      const mk=r=>{S.bets=S.bets.map(b=>b.id===bet.id?{...b,result:r}:b);save();toast(`Marked ${r}`);};
+      br2.appendChild(B({style:{background:"rgba(20,83,45,.4)",color:"#4ade80",border:"1px solid rgba(34,197,94,.25)",borderRadius:"7px",padding:"5px 11px",fontSize:"12px",fontWeight:700},onClick:()=>mk("Win")},"✓ Win"));
+      br2.appendChild(B({style:{background:"rgba(127,29,29,.4)",color:"#f87171",border:"1px solid rgba(239,68,68,.25)",borderRadius:"7px",padding:"5px 11px",fontSize:"12px",fontWeight:700},onClick:()=>mk("Loss")},"✗ Loss"));
+      br2.appendChild(B({style:{background:"rgba(30,41,59,.8)",color:"#64748b",border:"1px solid rgba(71,85,105,.3)",borderRadius:"7px",padding:"5px 11px",fontSize:"12px",fontWeight:700},onClick:()=>mk("Push")},"↔ Push"));
+      body.appendChild(br2);
+    }
+    card.appendChild(body); list.appendChild(card);
+  });
+  pg.appendChild(list); return pg;
+}
+
+// ═══════════════════════════════════════
+// LOG BET
+// ═══════════════════════════════════════
+function buildLog() {
+  const avail=S.isComm?S.players:(S.player?S.players.filter(p=>p.id===S.player.id):[]);
+  let pid=S.player?.id||(S.isComm?"":S.players[0]?.id||"");
+  const IS={background:"rgba(2,6,23,.9)",border:"1px solid rgba(30,41,59,.9)",borderRadius:"10px",padding:"11px 13px",fontSize:"14px",color:"#e2e8f0",width:"100%"};
+  const pg=D({style:{padding:"18px 16px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  pg.appendChild(D({style:{fontSize:"20px",fontWeight:800,color:"#f1f5f9",marginBottom:"14px"}},"Log a Bet"));
+  const card=D({style:{background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.8)",borderRadius:"16px",padding:"18px 15px",display:"flex",flexDirection:"column",gap:"12px"}});
+  const fld=(l,e2)=>{const w2=D({style:{display:"flex",flexDirection:"column",gap:"5px"}});w2.appendChild(S2({style:{fontSize:"11px",fontWeight:800,color:"#334155",textTransform:"uppercase",letterSpacing:".07em"}},l));w2.appendChild(e2);return w2;};
+  const psel=SL({style:{...IS,cursor:"pointer"}});
+  psel.appendChild(h("option",{value:""},"Select…"));
+  avail.forEach(p=>{const o=h("option",{value:p.id},`${p.name} (${bal(p.id)}u)`);if(p.id===pid)o.selected=true;psel.appendChild(o);});
+  if(!S.isComm&&S.player) psel.disabled=true;
+  psel.addEventListener("change",e=>{pid=e.target.value;upd();});
+  card.appendChild(fld("Player",psel));
+  const di=I({type:"text",placeholder:"e.g. Lakers -4.5, Chiefs ML…",style:IS}); card.appendChild(fld("Bet Description",di));
+  const tc=D({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px"}});
+  const spsel=SL({style:{...IS,cursor:"pointer"}}); ALL_SP.forEach(s=>spsel.appendChild(h("option",{},s))); spsel.value="NBA";
+  const tysel=SL({style:{...IS,cursor:"pointer"}}); ["Straight","Parlay","Teaser","Player Prop","SGP","Futures","Other"].forEach(t=>tysel.appendChild(h("option",{},t)));
+  tc.appendChild(fld("Sport",spsel)); tc.appendChild(fld("Type",tysel)); card.appendChild(tc);
+  const tc2=D({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px"}});
+  const ui=I({type:"number",placeholder:`1–${S.cfg.maxBet}`,style:IS});
+  const oi=I({type:"text",placeholder:"-110",style:IS}); oi.value="-110";
+  tc2.appendChild(fld(`Units (max ${S.cfg.maxBet})`,ui)); tc2.appendChild(fld("Odds (American)",oi)); card.appendChild(tc2);
+  const pv=D({style:{background:"rgba(234,179,8,.05)",border:"1px solid rgba(234,179,8,.12)",borderRadius:"10px",padding:"11px 13px",display:"none",flexDirection:"column",gap:"5px"}});
+  const mk2=(l,c)=>{const row=D({style:{display:"flex",justifyContent:"space-between"}});const v=S2({style:{color:c,fontWeight:700,fontSize:"13px"}},"");row.appendChild(S2({style:{color:"#475569",fontSize:"12px"}},l));row.appendChild(v);pv.appendChild(row);return v;};
+  const pvw=mk2("Potential win","#4ade80"),pvl=mk2("Balance if loss","#94a3b8"),pvb=mk2("Current balance","#e2e8f0");
+  card.appendChild(pv);
+  function upd(){const u=+ui.value,o=oi.value,b=bal(pid);if(u>0&&o){pv.style.display="flex";pvw.textContent=`+${cw(u,o)}u`;pvl.textContent=`${+(b-u).toFixed(1)}u`;pvb.textContent=`${b}u`;}else pv.style.display="none";}
+  ui.addEventListener("input",upd); oi.addEventListener("input",upd);
+  card.appendChild(B({style:{background:"linear-gradient(135deg,#15803d,#166534)",color:"#fff",borderRadius:"12px",padding:"13px",fontSize:"15px",fontWeight:700,width:"100%"},onClick:()=>{
+    const u=+ui.value,o=oi.value||"-110",d2=di.value.trim(),b=bal(pid);
+    if(!pid){toast("Select a player","err");return;}
+    if(!d2){toast("Describe your bet","err");return;}
+    if(!u||u<=0){toast("Enter valid units","err");return;}
+    if(u>S.cfg.maxBet){toast(`Max ${S.cfg.maxBet} units`,"err");return;}
+    if(u>b){toast(`Only ${b}u left`,"err");return;}
+    S.bets=[...S.bets,{id:uid(),playerId:pid,description:d2,betType:tysel.value,sport:spsel.value,units:u,odds:o,result:"Pending",week:S.week,createdAt:Date.now()}];
+    save(); toast("Bet logged! 🎯");
+    di.value=""; ui.value=""; oi.value="-110"; pv.style.display="none";
+  }},"Log Bet 🎯"));
+  pg.appendChild(card); return pg;
+}
+
+// ═══════════════════════════════════════
+// HISTORY
+// ═══════════════════════════════════════
+function buildHistory() {
+  const pg=D({style:{padding:"18px 16px",display:"flex",flexDirection:"column",gap:"14px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  pg.appendChild(D({style:{fontSize:"20px",fontWeight:800,color:"#f1f5f9"}},"History"));
+  const chips=D({style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+  [["weeks","Weeks"],["alltime","All-Time"],["sharps","Sport Sharps"],["bets","All Bets"]].forEach(([id,lbl])=>{
+    const a=S.histView===id;
+    chips.appendChild(B({style:{background:a?"rgba(20,83,45,.35)":"rgba(15,23,42,.8)",color:a?"#4ade80":"#334155",border:`1px solid ${a?"rgba(34,197,94,.35)":"rgba(30,41,59,.8)"}`,borderRadius:"8px",padding:"6px 12px",fontSize:"13px",fontWeight:600},onClick:()=>{S.histView=id;S.histSport=null;render();}},lbl));
+  });
+  pg.appendChild(chips);
+
+  if(S.histView==="weeks"){
+    if(!S.weeks.length){pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"No completed weeks yet."));return pg;}
+    S.weeks.slice().reverse().forEach(w=>{
+      const gp=id=>S.players.find(p=>p.id===id);
+      const c=D({style:{background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.7)",borderRadius:"14px",padding:"15px"}});
+      const tr2=D({style:{display:"flex",gap:"8px",alignItems:"center",marginBottom:"8px"}});
+      tr2.appendChild(S2({style:{fontSize:"15px",fontWeight:800,color:"#fbbf24"}},`Week ${w.week}`));
+      tr2.appendChild(S2({style:{background:"rgba(234,179,8,.1)",color:"#fbbf24",border:"1px solid rgba(234,179,8,.2)",borderRadius:"6px",padding:"1px 7px",fontSize:"11px",fontWeight:700}},`$${w.pot}`));
+      tr2.appendChild(S2({style:{color:"#334155",fontSize:"11px",marginLeft:"auto"}},w.date));
+      c.appendChild(tr2);
+      c.appendChild(D({style:{fontSize:"16px",fontWeight:700,color:"#f1f5f9",marginBottom:"7px"}},`🏆 ${w.winner} — ${w.winnerBal}u`));
+      if(w.best){const d=D({style:{fontSize:"12px",color:"#64748b",marginBottom:"3px"}});d.innerHTML=`🎯 Best: ${w.best.description} <span style="color:#4ade80">${fo(w.best.odds)}</span>`;c.appendChild(d);}
+      if(w.worst) c.appendChild(D({style:{fontSize:"12px",color:"#64748b",marginBottom:"8px"}},`💀 Worst: ${w.worst.description}`));
+      const st=D({style:{display:"flex",flexDirection:"column",gap:"4px",borderTop:"1px solid rgba(30,41,59,.4)",paddingTop:"8px"}});
+      (w.standings||[]).forEach((s,i)=>{const row=D({style:{display:"flex",alignItems:"center",gap:"8px",fontSize:"13px"}});row.appendChild(S2({},["🥇","🥈","🥉"][i]||`${i+1}.`));row.appendChild(S2({style:{color:"#94a3b8",flex:1}},s.name));row.appendChild(S2({style:{color:"#fbbf24",fontWeight:700}},`${s.bal}u`));st.appendChild(row);});
+      c.appendChild(st); pg.appendChild(c);
+    });
+  }
+
+  if(S.histView==="alltime"){
+    const ats=S.players.map(p=>{
+      const wins=S.weeks.filter(w=>w.winnerId===p.id).length;
+      const pb=S.bets.filter(b=>b.playerId===p.id);
+      const won=pb.filter(b=>b.result==="Win").length,lost=pb.filter(b=>b.result==="Loss").length;
+      const net=wins*(S.players.length*S.cfg.buyIn)-S.weeks.length*S.cfg.buyIn;
+      const bb=pb.filter(b=>b.result==="Win").sort((a,b)=>ip(+a.odds)-ip(+b.odds))[0];
+      return{...p,wins,total:pb.length,won,lost,net,bb};
+    }).sort((a,b)=>b.wins-a.wins);
+    if(!ats.length){pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"No history yet."));return pg;}
+    ats.forEach((p,i)=>{
+      const row=D({style:{display:"flex",alignItems:"center",gap:"12px",padding:"13px 15px",background:i===0?"rgba(234,179,8,.07)":"rgba(15,23,42,.6)",border:"1px solid rgba(30,58,47,.4)",borderRadius:"14px",marginBottom:"8px"}});
+      row.appendChild(D({style:{fontSize:"22px",minWidth:"30px"}},["🥇","🥈","🥉"][i]||String(i+1)));
+      const mid=D({style:{flex:1}});
+      mid.appendChild(D({style:{fontSize:"15px",fontWeight:700,color:"#f1f5f9",marginBottom:"4px"}},p.name));
+      const tags=D({style:{display:"flex",gap:"5px",flexWrap:"wrap"}});
+      [`${p.wins} wins`,`${p.won}W/${p.lost}L`,`${p.total} bets`].forEach(t=>tags.appendChild(S2({style:{background:"rgba(30,41,59,.9)",color:"#475569",borderRadius:"6px",padding:"2px 7px",fontSize:"11px",fontWeight:600}},t)));
+      mid.appendChild(tags);
+      if(p.bb) mid.appendChild(D({style:{fontSize:"11px",color:"#475569",marginTop:"4px"}},`Best ever: ${p.bb.description} (${fo(p.bb.odds)})`));
+      row.appendChild(mid);
+      const rt=D({style:{textAlign:"right"}});
+      rt.appendChild(D({style:{color:p.net>=0?"#4ade80":"#f87171",fontWeight:800,fontSize:"18px"}},`${p.net>=0?"+":""}$${p.net}`));
+      rt.appendChild(D({style:{color:"#475569",fontSize:"11px"}},"net $"));
+      row.appendChild(rt); pg.appendChild(row);
+    });
+  }
+
+  if(S.histView==="sharps"){
+    const settled=S.bets.filter(b=>b.result==="Win"||b.result==="Loss");
+    const sph=[...new Set(settled.map(b=>inferSport(b)))].sort();
+    if(!sph.length){pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"Settle some bets first."));return pg;}
+    const sc2=D({style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+    [["All",null],...sph.map(s=>[`${SE[s]||"🎯"} ${s}`,s])].forEach(([lbl,val])=>{
+      const a=S.histSport===val;
+      sc2.appendChild(B({style:{background:a?"rgba(20,83,45,.35)":"rgba(15,23,42,.8)",color:a?"#4ade80":"#334155",border:`1px solid ${a?"rgba(34,197,94,.35)":"rgba(30,41,59,.8)"}`,borderRadius:"8px",padding:"6px 12px",fontSize:"13px",fontWeight:600},onClick:()=>{S.histSport=val;render();}},lbl));
+    });
+    pg.appendChild(sc2);
+    (S.histSport?[S.histSport]:sph).forEach(sport=>{
+      const sb2=settled.filter(b=>inferSport(b)===sport); if(!sb2.length) return;
+      const stats=S.players.map(p=>{
+        const pb=sb2.filter(b=>b.playerId===p.id);
+        const won=pb.filter(b=>b.result==="Win").length,lost=pb.filter(b=>b.result==="Loss").length,total=pb.length;
+        const wPct=total>0?Math.round(won/total*100):0;
+        const net=+(pb.filter(b=>b.result==="Win").reduce((a,b)=>a+cw(b.units,b.odds),0)-pb.filter(b=>b.result==="Loss").reduce((a,b)=>a+b.units,0)).toFixed(1);
+        const bb=pb.filter(b=>b.result==="Win").sort((a,b)=>ip(+a.odds)-ip(+b.odds))[0];
+        return{...p,won,lost,total,wPct,net,bb};
+      }).filter(p=>p.total>0).sort((a,b)=>b.net-a.net);
+      if(!stats.length) return;
+      const sharp=stats[0];
+      const bn=D({style:{display:"flex",alignItems:"center",gap:"12px",background:"rgba(20,83,45,.18)",border:"1px solid rgba(34,197,94,.12)",borderRadius:"12px",padding:"11px 14px",marginBottom:"8px"}});
+      bn.appendChild(S2({style:{fontSize:"26px"}},SE[sport]||"🎯"));
+      const bd2=D({});
+      bd2.appendChild(D({style:{fontSize:"15px",fontWeight:800,color:"#fbbf24"}},sport));
+      const bl2=D({style:{fontSize:"12px",color:"#94a3b8",marginTop:"2px"}});
+      bl2.innerHTML=`Sharp: <strong style="color:#fbbf24">${sharp.name}</strong><span style="color:#4ade80;margin-left:8px">${sharp.won}W/${sharp.lost}L · ${sharp.net>=0?"+":""}${sharp.net}u</span>`;
+      bd2.appendChild(bl2); bn.appendChild(bd2); pg.appendChild(bn);
+      stats.forEach((p,i)=>{
+        const badge=i===0&&p.total>=3?"🔥 Sharp":p.wPct>=60&&p.total>=3?"📈 Hot":p.wPct<40&&p.total>=3?"🧊 Cold":null;
+        const row=D({style:{background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.7)",borderLeft:`3px solid ${i===0?"#f59e0b":p.net>=0?"#16a34a":"#dc2626"}`,borderRadius:"12px",padding:"12px 13px",marginBottom:"8px",display:"flex",justifyContent:"space-between",gap:"10px"}});
+        const lf=D({style:{display:"flex",gap:"10px",flex:1}});
+        lf.appendChild(S2({style:{fontSize:"18px"}},["🥇","🥈","🥉"][i]||String(i+1)));
+        const mid=D({style:{flex:1}});
+        const nm=D({style:{fontSize:"14px",fontWeight:700,color:"#e2e8f0"}},p.name);
+        if(badge) nm.appendChild(S2({style:{fontSize:"10px",color:i===0?"#fbbf24":"#4ade80",marginLeft:"6px"}},badge));
+        mid.appendChild(nm);
+        const tags=D({style:{display:"flex",gap:"5px",flexWrap:"wrap",marginTop:"4px"}});
+        [`${p.won}W/${p.lost}L`,`${p.wPct}%`,...(p.bb?[`best: ${fo(p.bb.odds)}`]:[])].forEach((t,j)=>tags.appendChild(S2({style:{background:"rgba(30,41,59,.9)",color:j===2?"#4ade80":"#475569",borderRadius:"6px",padding:"2px 7px",fontSize:"11px",fontWeight:600}},t)));
+        mid.appendChild(tags);
+        const bar3=D({style:{height:"3px",background:"rgba(255,255,255,.06)",borderRadius:"99px",overflow:"hidden",marginTop:"6px",maxWidth:"100px"}});
+        bar3.appendChild(D({style:{height:"100%",width:`${p.wPct}%`,background:p.wPct>=55?"#16a34a":p.wPct<40?"#dc2626":"#475569",borderRadius:"99px"}}));
+        mid.appendChild(bar3); lf.appendChild(mid); row.appendChild(lf);
+        const rt=D({style:{textAlign:"right"}});
+        rt.appendChild(D({style:{color:p.net>=0?"#4ade80":"#f87171",fontWeight:800,fontSize:"15px"}},`${p.net>=0?"+":""}${p.net}u`));
+        rt.appendChild(D({style:{color:"#475569",fontSize:"10px"}},"net units"));
+        row.appendChild(rt); pg.appendChild(row);
+      });
+    });
+  }
+
+  if(S.histView==="bets"){
+    if(!S.bets.length){pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"No bets yet."));return pg;}
+    S.bets.slice().reverse().forEach(bet=>{
+      const pl=S.players.find(p=>p.id===bet.playerId),sport=inferSport(bet),col=rc(bet.result);
+      const card=D({style:{display:"flex",background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.7)",borderRadius:"13px",overflow:"hidden",marginBottom:"8px"}});
+      card.appendChild(D({style:{width:"4px",flexShrink:0,background:col}}));
+      const body=D({style:{flex:1,padding:"11px 12px 11px 10px"}});
+      const tr2=D({style:{display:"flex",justifyContent:"space-between",marginBottom:"5px"}});
+      const pr=D({style:{display:"flex",alignItems:"center",gap:"5px"}});
+      pr.appendChild(D({style:{width:"22px",height:"22px",borderRadius:"50%",background:ac(pl?.name),display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:800,color:"#fff"}},pl?.name?.[0]||"?"));
+      pr.appendChild(S2({style:{fontSize:"12px",fontWeight:700,color:"#94a3b8"}},pl?.name||""));
+      pr.appendChild(S2({style:{fontSize:"9px",color:"#334155",background:"rgba(30,41,59,.9)",padding:"1px 5px",borderRadius:"4px"}},`${SE[sport]||"🎯"} ${sport}`));
+      pr.appendChild(S2({style:{fontSize:"10px",color:"#334155"}},`Wk ${bet.week}`));
+      tr2.appendChild(pr);
+      tr2.appendChild(D({style:{borderRadius:"7px",padding:"2px 8px",fontSize:"11px",fontWeight:700,border:`1px solid ${col}55`,background:col+"22",color:col}},bet.result));
+      body.appendChild(tr2);
+      body.appendChild(D({style:{fontSize:"13px",color:"#e2e8f0",marginBottom:"5px"}},bet.description));
+      const tg=D({style:{display:"flex",gap:"5px"}});
+      [bet.betType,`${bet.units}u @ ${fo(bet.odds)}`].forEach(t=>tg.appendChild(S2({style:{background:"rgba(30,41,59,.9)",color:"#475569",borderRadius:"6px",padding:"2px 7px",fontSize:"11px",fontWeight:600}},t)));
+      body.appendChild(tg); card.appendChild(body); pg.appendChild(card);
+    });
+  }
+  return pg;
+}
+
+// ═══════════════════════════════════════
+// RECAP
+// ═══════════════════════════════════════
+function buildRecap(bd2) {
+  if(!bd2) bd2=board();
+  const w2=wb(),best=w2.filter(b=>b.result==="Win").sort((a,b)=>ip(+a.odds)-ip(+b.odds))[0]||null,worst=w2.filter(b=>b.result==="Loss").sort((a,b)=>b.units-a.units)[0]||null;
+  const gp=id=>S.players.find(p=>p.id===id);
+  const pg=D({style:{padding:"18px 16px",display:"flex",flexDirection:"column",gap:"14px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  pg.appendChild(D({style:{fontSize:"20px",fontWeight:800,color:"#f1f5f9"}},"Recap"));
+  const hero=D({style:{background:"linear-gradient(135deg,rgba(20,83,45,.3),rgba(6,78,59,.22))",border:"1px solid rgba(34,197,94,.18)",borderRadius:"18px",padding:"22px",textAlign:"center"}});
+  hero.appendChild(D({style:{fontSize:"10px",fontWeight:700,color:"#4ade80",letterSpacing:".14em",textTransform:"uppercase"}},`WEEK ${S.week} — IN PROGRESS`));
+  if(bd2[0]){hero.appendChild(D({style:{fontSize:"26px",fontWeight:800,color:"#fbbf24",margin:"8px 0 4px"}},bd2[0].name));hero.appendChild(D({style:{fontSize:"15px",color:"#4ade80",fontWeight:700}},`${bd2[0].bal} units`));}
+  else hero.appendChild(D({style:{color:"#475569",marginTop:"8px"}},"No players yet"));
+  pg.appendChild(hero);
+  if(best||worst){
+    const g2=D({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px"}});
+    if(best){const c=D({style:{background:"rgba(20,83,45,.12)",border:"1px solid rgba(34,197,94,.12)",borderRadius:"14px",padding:"14px",textAlign:"center"}});c.appendChild(D({style:{fontSize:"22px"}},"🎯"));c.appendChild(D({style:{fontSize:"10px",fontWeight:700,color:"#334155",textTransform:"uppercase"}},"Best Bet"));c.appendChild(D({style:{fontSize:"14px",fontWeight:700,color:"#f1f5f9",margin:"4px 0 2px"}},gp(best.playerId)?.name||""));c.appendChild(D({style:{fontSize:"11px",color:"#475569",lineHeight:"1.4"}},best.description));c.appendChild(D({style:{fontSize:"14px",fontWeight:700,color:"#4ade80",marginTop:"5px"}},fo(best.odds)));g2.appendChild(c);}
+    if(worst){const c=D({style:{background:"rgba(127,29,29,.12)",border:"1px solid rgba(239,68,68,.12)",borderRadius:"14px",padding:"14px",textAlign:"center"}});c.appendChild(D({style:{fontSize:"22px"}},"💀"));c.appendChild(D({style:{fontSize:"10px",fontWeight:700,color:"#334155",textTransform:"uppercase"}},"Worst Beat"));c.appendChild(D({style:{fontSize:"14px",fontWeight:700,color:"#f1f5f9",margin:"4px 0 2px"}},gp(worst.playerId)?.name||""));c.appendChild(D({style:{fontSize:"11px",color:"#475569",lineHeight:"1.4"}},worst.description));c.appendChild(D({style:{fontSize:"14px",fontWeight:700,color:"#f87171",marginTop:"5px"}},`-${worst.units}u`));g2.appendChild(c);}
+    pg.appendChild(g2);
+  }
+  if(!S.weeks.length){pg.appendChild(D({style:{color:"#1e293b",textAlign:"center",padding:"36px 20px",border:"1px dashed rgba(30,41,59,.5)",borderRadius:"12px"}},"Lock the current week to see past recaps."));return pg;}
+  S.weeks.slice().reverse().forEach(w=>{
+    const c=D({style:{background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.7)",borderRadius:"14px",padding:"15px"}});
+    const tr2=D({style:{display:"flex",gap:"8px",alignItems:"center",marginBottom:"8px"}});
+    tr2.appendChild(S2({style:{fontSize:"15px",fontWeight:800,color:"#fbbf24"}},`Week ${w.week}`));
+    tr2.appendChild(S2({style:{background:"rgba(234,179,8,.1)",color:"#fbbf24",border:"1px solid rgba(234,179,8,.2)",borderRadius:"6px",padding:"1px 7px",fontSize:"11px",fontWeight:700}},`$${w.pot}`));
+    tr2.appendChild(S2({style:{color:"#334155",fontSize:"11px",marginLeft:"auto"}},w.date));
+    c.appendChild(tr2);
+    const wn=D({style:{fontSize:"17px",fontWeight:700,color:"#f1f5f9",marginBottom:"8px"}});
+    wn.innerHTML=`🏆 <span style="color:#fbbf24">${w.winner}</span> wins!`;
+    c.appendChild(wn);
+    if(w.best){const d=D({style:{fontSize:"12px",color:"#64748b",marginBottom:"3px"}});d.innerHTML=`🎯 <strong style="color:#e2e8f0">${gp(w.best.playerId)?.name||""}</strong> — ${w.best.description} <span style="color:#4ade80">${fo(w.best.odds)}</span>`;c.appendChild(d);}
+    if(w.worst){const d=D({style:{fontSize:"12px",color:"#64748b",marginBottom:"8px"}});d.innerHTML=`💀 <strong style="color:#e2e8f0">${gp(w.worst.playerId)?.name||""}</strong> — ${w.worst.description}`;c.appendChild(d);}
+    const st=D({style:{display:"flex",flexDirection:"column",gap:"4px",borderTop:"1px solid rgba(30,41,59,.4)",paddingTop:"8px"}});
+    (w.standings||[]).forEach((s,i)=>{const row=D({style:{display:"flex",alignItems:"center",gap:"8px",fontSize:"13px"}});row.appendChild(S2({},["🥇","🥈","🥉"][i]||`${i+1}.`));row.appendChild(S2({style:{color:"#94a3b8",flex:1}},s.name));row.appendChild(S2({style:{color:"#fbbf24",fontWeight:700}},`${s.bal}u`));st.appendChild(row);});
+    c.appendChild(st); pg.appendChild(c);
+  });
+  return pg;
+}
+
+// ═══════════════════════════════════════
+// SETUP
+// ═══════════════════════════════════════
+function buildSetup() {
+  const IS={background:"rgba(2,6,23,.9)",border:"1px solid rgba(30,41,59,.9)",borderRadius:"10px",padding:"11px 13px",fontSize:"14px",color:"#e2e8f0",width:"100%"};
+  const pg=D({style:{padding:"18px 16px",maxWidth:"720px",margin:"0 auto",width:"100%"}});
+  pg.appendChild(D({style:{fontSize:"20px",fontWeight:800,color:"#f1f5f9",marginBottom:"14px"}},"Commissioner Setup"));
+  const card=D({style:{background:"rgba(15,23,42,.7)",border:"1px solid rgba(30,41,59,.8)",borderRadius:"16px",padding:"18px 15px",display:"flex",flexDirection:"column",gap:"14px"}});
+  const sec=t=>D({style:{fontSize:"11px",fontWeight:800,color:"#4ade80",textTransform:"uppercase",letterSpacing:".08em"}},t);
+  const fld=(l,e2)=>{const w2=D({style:{display:"flex",flexDirection:"column",gap:"5px"}});w2.appendChild(S2({style:{fontSize:"11px",fontWeight:800,color:"#334155",textTransform:"uppercase",letterSpacing:".07em"}},l));w2.appendChild(e2);return w2;};
+  const div2=()=>D({style:{borderTop:"1px solid rgba(30,41,59,.5)"}});
+
+  // League settings
+  card.appendChild(sec("League Settings"));
+  const lni=I({type:"text",style:IS}); lni.value=S.cfg.leagueName; lni.addEventListener("change",e=>{S.cfg.leagueName=e.target.value;save();}); card.appendChild(fld("League Name",lni));
+  const tc=D({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px"}});
+  const sui=I({type:"number",style:IS}); sui.value=S.cfg.startingUnits; sui.addEventListener("change",e=>{S.cfg.startingUnits=+e.target.value;save();});
+  const mbi=I({type:"number",style:IS}); mbi.value=S.cfg.maxBet; mbi.addEventListener("change",e=>{S.cfg.maxBet=+e.target.value;save();});
+  tc.appendChild(fld("Starting Units",sui)); tc.appendChild(fld("Max Bet",mbi)); card.appendChild(tc);
+  const bii=I({type:"number",style:IS}); bii.value=S.cfg.buyIn; bii.addEventListener("change",e=>{S.cfg.buyIn=+e.target.value;save();}); card.appendChild(fld("Buy-In Per Player ($)",bii));
+  const spsel=SL({style:{...IS,cursor:"pointer"}}); Object.keys(SMAP).forEach(s=>{const o=h("option",{value:s},s);if(s===S.cfg.sport)o.selected=true;spsel.appendChild(o);}); spsel.addEventListener("change",e=>{S.cfg.sport=e.target.value;save();}); card.appendChild(fld("Default Sport",spsel));
+
+  // Backend URL — the key section
+  card.appendChild(div2());
+  card.appendChild(sec("Live Lines Backend"));
+  const curBackend = getBackend();
+  const statusBox = D({style:{background:curBackend?"rgba(34,197,94,.08)":"rgba(234,179,8,.08)",border:`1px solid ${curBackend?"rgba(34,197,94,.25)":"rgba(234,179,8,.25)"}`,borderRadius:"10px",padding:"12px 14px",fontSize:"13px",color:curBackend?"#4ade80":"#fbbf24",lineHeight:"1.6"}});
+  statusBox.innerHTML = curBackend
+    ? `✅ Backend connected: <span style="color:#e2e8f0;font-size:12px">${curBackend}</span>`
+    : `⚠ No backend set — live lines won't work until you deploy and paste your Vercel URL below.`;
+  card.appendChild(statusBox);
+
+  const steps=D({style:{background:"rgba(30,41,59,.4)",borderRadius:"10px",padding:"14px",fontSize:"12px",color:"#64748b",lineHeight:"1.8"}});
+  steps.innerHTML=`<strong style="color:#e2e8f0">How to get live lines (3 min, free):</strong><br>
+1. Go to <strong style="color:#4ade80">vercel.com</strong> → sign up free<br>
+2. Download the zip file from Claude's last message<br>
+3. Create new project → upload the zip → Deploy<br>
+4. Copy the URL Vercel gives you (e.g. <span style="color:#94a3b8">https://my-league.vercel.app</span>)<br>
+5. Paste it below and tap Save`;
+  card.appendChild(steps);
+
+  const bui=I({type:"text",placeholder:"https://your-app.vercel.app",style:IS}); bui.value=curBackend;
+  card.appendChild(fld("Your Vercel Backend URL",bui));
+  card.appendChild(B({style:{background:"linear-gradient(135deg,#15803d,#166534)",color:"#fff",borderRadius:"10px",padding:"11px",fontSize:"14px",fontWeight:700,width:"100%"},onClick:()=>{
+    const v=bui.value.trim().replace(/\/$/,"");
+    LS.s("blg:backend",v);
+    toast(v?"✅ Backend saved! Go to Lines tab to test.":"Backend cleared.");
+    render();
+  }},"Save Backend URL"));
+
+  // Players
+  card.appendChild(div2());
+  card.appendChild(sec("Players  ·  PIN: 1234"));
+  const ar=D({style:{display:"flex",gap:"8px"}});
+  const npi=I({type:"text",placeholder:"Player name…",style:{...IS,flex:1}});
+  const ab=B({style:{background:"#15803d",color:"#fff",borderRadius:"10px",padding:"0 16px",fontSize:"14px",fontWeight:700,whiteSpace:"nowrap"},onClick:()=>{
+    const n=npi.value.trim();
+    if(!n)return;
+    if(S.players.find(p=>p.name.toLowerCase()===n.toLowerCase())){toast("Already exists","err");return;}
+    S.players=[...S.players,{id:uid(),name:n,joinedWeek:S.week}];
+    save(); npi.value=""; toast(`${n} added!`); render();
+  }},"Add");
+  npi.addEventListener("keydown",e=>{if(e.key==="Enter")ab.click();});
+  ar.appendChild(npi); ar.appendChild(ab); card.appendChild(ar);
+  S.players.forEach(p=>{
+    const row=D({style:{display:"flex",alignItems:"center",gap:"10px",background:"rgba(2,6,23,.6)",borderRadius:"10px",padding:"9px 12px"}});
+    row.appendChild(D({style:{width:"30px",height:"30px",borderRadius:"50%",background:ac(p.name),display:"flex",alignItems:"center",justifyContent:"center",fontSize:"13px",fontWeight:800,color:"#fff"}},p.name[0].toUpperCase()));
+    row.appendChild(S2({style:{color:"#e2e8f0",fontWeight:600,flex:1}},p.name));
+    row.appendChild(B({style:{background:"rgba(127,29,29,.25)",color:"#f87171",border:"1px solid rgba(239,68,68,.18)",borderRadius:"7px",padding:"4px 9px",fontSize:"12px"},onClick:()=>{
+      if(S.bets.some(b=>b.playerId===p.id)){toast("Can't remove player with logged bets","err");return;}
+      S.players=S.players.filter(x=>x.id!==p.id); save(); render();
+    }},"Remove"));
+    card.appendChild(row);
+  });
+  if(!S.players.length) card.appendChild(D({style:{color:"#475569",fontSize:"13px"}},"No players yet."));
+  pg.appendChild(card); return pg;
+}
+
+// ═══════════════════════════════════════
+// LOCK MODAL
+// ═══════════════════════════════════════
+function buildLockModal(bd2) {
+  const top=bd2[0];
+  const ov=D({style:{position:"fixed",inset:0,background:"rgba(0,0,0,.8)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}});
+  ov.addEventListener("click",()=>{S.modal=null;render();});
+  const box=D({style:{background:"#0f172a",border:"1px solid rgba(30,58,47,.8)",borderRadius:"20px",padding:"28px 24px",maxWidth:"380px",width:"100%"}});
+  box.addEventListener("click",e=>e.stopPropagation());
+  box.appendChild(D({style:{fontSize:"34px",marginBottom:"7px"}},"🏁"));
+  box.appendChild(D({style:{fontSize:"19px",fontWeight:800,color:"#f1f5f9",marginBottom:"7px"}},`Lock Week ${S.week}?`));
+  const body=D({style:{fontSize:"14px",color:"#94a3b8",lineHeight:"1.65"}});
+  if(top) body.innerHTML=`<strong style="color:#fbbf24">${top.name}</strong> leads with <strong style="color:#4ade80">${top.bal}u</strong> — takes the <strong style="color:#fbbf24">$${S.players.length*S.cfg.buyIn} pot</strong>.`;
+  else body.textContent="No players yet.";
+  box.appendChild(body);
+  const br2=D({style:{display:"flex",gap:"10px",marginTop:"20px"}});
+  br2.appendChild(B({style:{flex:1,background:"transparent",color:"#475569",border:"1px solid rgba(71,85,105,.3)",borderRadius:"10px",padding:"10px",fontSize:"14px"},onClick:()=>{S.modal=null;render();}},"Cancel"));
+  br2.appendChild(B({style:{flex:2,background:"linear-gradient(135deg,#15803d,#166534)",color:"#fff",borderRadius:"10px",padding:"10px",fontSize:"14px",fontWeight:700},onClick:endWeek},`Lock & Start Week ${S.week+1}`));
+  box.appendChild(br2); ov.appendChild(box); return ov;
+}
+
+// Boot
+render();
+</script>
+</body>
+</html>
